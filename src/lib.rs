@@ -11,8 +11,18 @@ mod allocator;
 use allocator::HugePageAllocator;
 
 #[cfg(target_os = "linux")]
+mod boxed;
+#[cfg(target_os = "linux")]
+pub use boxed::Box;
+
+#[cfg(target_os = "linux")]
 lazy_static! {
     static ref HUGEPAGE_ALLOCATOR: HugePageAllocator = HugePageAllocator;
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn default_allocator() -> &'static HugePageAllocator {
+    &HUGEPAGE_ALLOCATOR
 }
 
 /// Allocate memory with the hugepage allocator.
