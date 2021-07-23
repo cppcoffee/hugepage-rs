@@ -88,6 +88,8 @@ unsafe impl GlobalAlloc for HugePageAllocator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::mem::{forget, transmute};
+    use std::ptr::copy_nonoverlapping;
 
     #[test]
     fn test_parse_hugepage_size() {
@@ -107,10 +109,34 @@ mod tests {
     }
 
     #[test]
-    fn test_basic() {
+    fn test_allocator() {
         let hugepage_alloc = HugePageAllocator;
-        let layout = Layout::from_size_align(16, 8).unwrap();
-        let p = unsafe { hugepage_alloc.alloc(layout) };
-        assert_ne!(p, null_mut());
+
+        // u16.
+        unsafe {
+            let layout = Layout::new::<u16>();
+            let p = hugepage_alloc.alloc(layout);
+            assert_ne!(p, null_mut());
+            *p = 20;
+            assert_eq!(*p, 20);
+            hugepage_alloc.dealloc(p, layout);
+        }
+
+        // array.
+        unsafe {
+            let layout = Layout::array::<char>(2048).unwrap();
+            let p = hugepage_alloc.alloc(layout);
+            assert_ne!(p, null_mut());
+
+            let src = vec!['r', 'u', 's', 't'];
+            let len = src.len();
+            let cap = src.capacity();
+            copy_nonoverlapping(src.as_ptr(), p as *mut char, len);
+            let v = Vec::from_raw_parts(p as *mut char, len, cap);
+            assert_eq!(v, src);
+            forget(v);
+
+            hugepage_alloc.dealloc(p, layout);
+        }
     }
 }
