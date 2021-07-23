@@ -33,6 +33,21 @@ fn main() {
 }
 ```
 
+#### HugePage Boxed
+
+Simple Box<T> implementation with ownership, data on hugepage allocated memory, released directly after going out of scope, memory allocator using hugepage allocator.
+
+```
+use hugepage_rs;
+
+fn main() {
+    let mut v = hugepage_rs::Box::new(5);
+    *v += 42;
+    assert_eq!(*v, 47);
+}
+```
+
+
 ### Notes
 
 - System need to enable hugepage.
