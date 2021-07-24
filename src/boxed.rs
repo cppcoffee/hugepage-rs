@@ -20,6 +20,12 @@ impl<T> Box<T> {
             Self { data: p }
         }
     }
+
+    pub unsafe fn from_raw(raw: *mut T) -> Self {
+        Self {
+            data: NonNull::new(raw).unwrap(),
+        }
+    }
 }
 
 impl<T> Drop for Box<T> {
