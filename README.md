@@ -55,9 +55,17 @@ fn main() {
 
 ### Reference
 
-[https://www.kernel.org/doc/Documentation/vm/hugetlbpage.txt](https://www.kernel.org/doc/Documentation/vm/hugetlbpage.txt)
+[Huge pages part 1 (Introduction)](https://lwn.net/Articles/374424/)
 
-[https://wiki.debian.org/Hugepages](https://wiki.debian.org/Hugepages)
+[Huge pages part 2: Interfaces](https://lwn.net/Articles/375096/)
+
+[Huge pages part 3: Administration](https://lwn.net/Articles/376606/)
+
+[Huge pages part 4: benchmarking with huge pages](https://lwn.net/Articles/378641/)
+
+[Huge pages part 5: A deeper look at TLBs and costs](https://lwn.net/Articles/379748/)
+
+[https://www.kernel.org/doc/Documentation/vm/hugetlbpage.txt](https://www.kernel.org/doc/Documentation/vm/hugetlbpage.txt)
 
 [https://man7.org/linux/man-pages/man2/mmap.2.html](https://man7.org/linux/man-pages/man2/mmap.2.html)
 
