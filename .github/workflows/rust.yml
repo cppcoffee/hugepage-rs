@@ -16,6 +16,8 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
+    - name: hugepage settings
+      run: sudo sysctl -w vm.nr_hugepages=10240
     - name: Build
       run: cargo build --verbose
     - name: Run tests
