@@ -1,6 +1,7 @@
 use crate::default_allocator;
 
 use std::alloc::{GlobalAlloc, Layout};
+use std::mem::{self, ManuallyDrop};
 use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
 
@@ -27,11 +28,10 @@ impl<T> Box<T> {
         }
     }
 
-    pub fn leak<'a>(b: Self) -> &'a mut T
-    where
-        A: 'a,
-    {
-        unsafe { &mut *mem::ManuallyDrop::new(b).0.as_ptr() }
+    pub fn leak(b: Self) -> *mut T {
+        let p = b.data.as_ptr();
+        std::mem::forget(b);
+        p
     }
 }
 
