@@ -26,6 +26,13 @@ impl<T> Box<T> {
             data: NonNull::new(raw).unwrap(),
         }
     }
+
+    pub fn leak<'a>(b: Self) -> &'a mut T
+    where
+        A: 'a,
+    {
+        unsafe { &mut *mem::ManuallyDrop::new(b).0.as_ptr() }
+    }
 }
 
 impl<T> Drop for Box<T> {
@@ -72,5 +79,12 @@ mod tests {
             assert_ne!(&*v, &src);
             assert_eq!(&*v, &[2, 2, 3, 4]);
         }
+    }
+
+    #[test]
+    fn test_leak() {
+        let v = Box::new(5);
+        let p = Box::leak(v);
+        assert_eq!(*p, 5);
     }
 }
