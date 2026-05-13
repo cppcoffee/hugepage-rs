@@ -14,5 +14,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo fmt --check
       - run: cargo clippy -- -D warnings
+      - run: sudo sysctl -w vm.nr_hugepages=10240
       - run: cargo build
       - run: cargo test
