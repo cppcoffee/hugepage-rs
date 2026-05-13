@@ -6,56 +6,43 @@ use std::{
     fs::File,
     io::Read,
     ptr::null_mut,
+    sync::LazyLock,
 };
 
 // https://www.kernel.org/doc/Documentation/vm/hugetlbpage.txt
-//
-// The output of "cat /proc/meminfo" will include lines like:
-// ...
-// HugePages_Total: uuu
-// HugePages_Free:  vvv
-// HugePages_Rsvd:  www
-// HugePages_Surp:  xxx
-// Hugepagesize:    yyy kB
-// Hugetlb:         zzz kB
-
-// constant.
 const MEMINFO_PATH: &str = "/proc/meminfo";
 const TOKEN: &str = "Hugepagesize:";
 
-lazy_static! {
-    static ref HUGEPAGE_SIZE: isize = {
-        let buf = File::open(MEMINFO_PATH).map_or("".to_owned(), |mut f| {
-            let mut s = String::new();
-            let _ = f.read_to_string(&mut s);
-            s
-        });
-        parse_hugepage_size(&buf)
-    };
-}
+pub(crate) static HUGEPAGE_SIZE: LazyLock<usize> = LazyLock::new(|| {
+    let mut buf = String::new();
+    if let Ok(mut f) = File::open(MEMINFO_PATH) {
+        let _ = f.read_to_string(&mut buf);
+    }
+    parse_hugepage_size(&buf).expect("failed to parse hugepage size from /proc/meminfo")
+});
 
-fn parse_hugepage_size(s: &str) -> isize {
+fn parse_hugepage_size(s: &str) -> Option<usize> {
     for line in s.lines() {
         if line.starts_with(TOKEN) {
             let mut parts = line[TOKEN.len()..].split_whitespace();
-
-            let p = parts.next().unwrap_or("0");
-            let mut hugepage_size = p.parse::<isize>().unwrap_or(-1);
-
-            hugepage_size *= parts.next().map_or(1, |x| match x {
-                "kB" => 1024,
-                _ => 1,
-            });
-
-            return hugepage_size;
+            let size: usize = parts.next()?.parse().ok()?;
+            let multiplier = match parts.next() {
+                Some("kB") => 1024,
+                Some(_) => return None,
+                None => 1,
+            };
+            return Some(size * multiplier);
         }
     }
-
-    return -1;
+    None
 }
 
 fn align_to(size: usize, align: usize) -> usize {
     (size + align - 1) & !(align - 1)
+}
+
+pub(crate) fn aligned_size(layout: Layout) -> usize {
+    align_to(layout.size(), *HUGEPAGE_SIZE)
 }
 
 // hugepage allocator.
@@ -63,7 +50,7 @@ pub(crate) struct HugePageAllocator;
 
 unsafe impl GlobalAlloc for HugePageAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let len = align_to(layout.size(), *HUGEPAGE_SIZE as usize);
+        let len = aligned_size(layout);
         let p = libc::mmap(
             null_mut(),
             len,
@@ -81,7 +68,8 @@ unsafe impl GlobalAlloc for HugePageAllocator {
     }
 
     unsafe fn dealloc(&self, p: *mut u8, layout: Layout) {
-        libc::munmap(p as *mut c_void, layout.size());
+        let len = aligned_size(layout);
+        libc::munmap(p as *mut c_void, len);
     }
 }
 
@@ -92,13 +80,11 @@ mod tests {
 
     #[test]
     fn test_parse_hugepage_size() {
-        // correct.
-        assert_eq!(parse_hugepage_size("Hugepagesize:1024"), 1024);
-        assert_eq!(parse_hugepage_size("Hugepagesize: 2 kB"), 2048);
-
-        // wrong.
-        assert_eq!(parse_hugepage_size("Hugepagesize:1kB"), -1);
-        assert_eq!(parse_hugepage_size("Hugepagesize: 2kB"), -1);
+        assert_eq!(parse_hugepage_size("Hugepagesize: 2048 kB"), Some(2048 * 1024));
+        assert_eq!(parse_hugepage_size("Hugepagesize: 1024"), Some(1024));
+        assert_eq!(parse_hugepage_size("Hugepagesize:"), None);
+        assert_eq!(parse_hugepage_size("Hugepagesize: abc kB"), None);
+        assert_eq!(parse_hugepage_size(""), None);
     }
 
     #[test]
@@ -111,7 +97,6 @@ mod tests {
     fn test_allocator() {
         let hugepage_alloc = HugePageAllocator;
 
-        // u16.
         unsafe {
             let layout = Layout::new::<u16>();
             let p = hugepage_alloc.alloc(layout);
@@ -121,7 +106,6 @@ mod tests {
             hugepage_alloc.dealloc(p, layout);
         }
 
-        // array.
         unsafe {
             let layout = Layout::array::<char>(2048).unwrap();
             let dst = hugepage_alloc.alloc(layout);
