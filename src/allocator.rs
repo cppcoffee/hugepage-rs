@@ -23,8 +23,8 @@ pub(crate) static HUGEPAGE_SIZE: LazyLock<usize> = LazyLock::new(|| {
 
 fn parse_hugepage_size(s: &str) -> Option<usize> {
     for line in s.lines() {
-        if line.starts_with(TOKEN) {
-            let mut parts = line[TOKEN.len()..].split_whitespace();
+        if let Some(rest) = line.strip_prefix(TOKEN) {
+            let mut parts = rest.split_whitespace();
 
             let size: usize = parts.next()?.parse().ok()?;
 

@@ -23,6 +23,9 @@ impl<T> Box<T> {
         }
     }
 
+    /// # Safety
+    ///
+    /// `raw` must be a non-null pointer previously obtained from `Box::into_raw`.
     pub unsafe fn from_raw(raw: *mut T) -> Self {
         Self {
             data: NonNull::new(raw).expect("Box::from_raw received null pointer"),
