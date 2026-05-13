@@ -2,28 +2,30 @@ use crate::default_allocator;
 
 use std::alloc::{GlobalAlloc, Layout};
 use std::ops::{Deref, DerefMut};
-use std::ptr::NonNull;
+use std::ptr::{self, NonNull};
 
 /// A pointer type for hugepage allocation.
-///
-/// Allocates memory on the hugepage and then places x into it.
 pub struct Box<T> {
     data: NonNull<T>,
 }
+
+unsafe impl<T: Send> Send for Box<T> {}
+unsafe impl<T: Sync> Sync for Box<T> {}
 
 impl<T> Box<T> {
     pub fn new(data: T) -> Box<T> {
         let layout = Layout::new::<T>();
         unsafe {
-            let mut p = NonNull::new(default_allocator().alloc(layout) as *mut T).unwrap();
-            *(p.as_mut()) = data;
-            Self { data: p }
+            let p = default_allocator().alloc(layout) as *mut T;
+            let mut nn = NonNull::new(p).expect("hugepage allocation failed");
+            ptr::write(nn.as_mut(), data);
+            Self { data: nn }
         }
     }
 
     pub unsafe fn from_raw(raw: *mut T) -> Self {
         Self {
-            data: NonNull::new(raw).unwrap(),
+            data: NonNull::new(raw).expect("Box::from_raw received null pointer"),
         }
     }
 }
@@ -31,6 +33,7 @@ impl<T> Box<T> {
 impl<T> Drop for Box<T> {
     fn drop(&mut self) {
         unsafe {
+            ptr::drop_in_place(self.data.as_ptr());
             default_allocator().dealloc(self.data.as_ptr() as *mut u8, Layout::new::<T>());
         }
     }
@@ -55,14 +58,12 @@ mod tests {
 
     #[test]
     fn test_boxed() {
-        // variable.
         {
             let mut v = Box::new(5);
             *v += 42;
             assert_eq!(*v, 47);
         }
 
-        // array.
         {
             let src: [u32; 4] = [1, 2, 3, 4];
             let mut v = Box::new(src);
@@ -72,5 +73,14 @@ mod tests {
             assert_ne!(&*v, &src);
             assert_eq!(&*v, &[2, 2, 3, 4]);
         }
+    }
+
+    #[test]
+    fn test_boxed_drop_inner() {
+        // Verify that inner values with Drop are properly dropped
+        let s = String::from("hello hugepage");
+        let b = Box::new(s.clone());
+        assert_eq!(&*b, &s);
+        drop(b); // should not leak
     }
 }
