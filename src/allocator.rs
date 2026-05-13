@@ -25,15 +25,19 @@ fn parse_hugepage_size(s: &str) -> Option<usize> {
     for line in s.lines() {
         if line.starts_with(TOKEN) {
             let mut parts = line[TOKEN.len()..].split_whitespace();
+
             let size: usize = parts.next()?.parse().ok()?;
+
             let multiplier = match parts.next() {
+                None => 1,
                 Some("kB") => 1024,
                 Some(_) => return None,
-                None => 1,
             };
+
             return Some(size * multiplier);
         }
     }
+
     None
 }
 
@@ -80,7 +84,10 @@ mod tests {
 
     #[test]
     fn test_parse_hugepage_size() {
-        assert_eq!(parse_hugepage_size("Hugepagesize: 2048 kB"), Some(2048 * 1024));
+        assert_eq!(
+            parse_hugepage_size("Hugepagesize: 2048 kB"),
+            Some(2048 * 1024)
+        );
         assert_eq!(parse_hugepage_size("Hugepagesize: 1024"), Some(1024));
         assert_eq!(parse_hugepage_size("Hugepagesize:"), None);
         assert_eq!(parse_hugepage_size("Hugepagesize: abc kB"), None);
