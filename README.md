@@ -4,6 +4,20 @@ hugepage-rs wrapped allocator for linux hugepage.
 
 ### Usage
 
+#### Hugepage Size
+
+`hugepage_rs::hugepage_size()` returns the system's default hugepage size in bytes, as used by this allocator. Every call reads `/proc/meminfo` again without caching the result. I/O errors are returned if `/proc/meminfo` cannot be read; missing or invalid hugepage size information returns `InvalidData`.
+
+```rust
+fn main() -> std::io::Result<()> {
+    let size = hugepage_rs::hugepage_size()?;
+    println!("Default hugepage size: {size} bytes");
+    Ok(())
+}
+```
+
+This queries the hugepage size, not the regular OS page size or the number of available hugepages. It works even when no hugepages have been reserved.
+
 #### HugePage Allocator
 
 Hugepage allocator provides two interfaces for operation, **hugepage_rs::alloc** and **hugepage_rs::dealloc**, allocate and free hugepage memory.

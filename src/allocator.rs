@@ -1,19 +1,47 @@
 use libc::{
     self, c_void, MAP_ANONYMOUS, MAP_FAILED, MAP_HUGETLB, MAP_PRIVATE, PROT_READ, PROT_WRITE,
 };
-use std::{alloc::Layout, fs::File, io::Read, ptr::null_mut, sync::LazyLock};
+use std::{alloc::Layout, fs, io, ptr::null_mut, sync::LazyLock};
 
 // https://www.kernel.org/doc/Documentation/vm/hugetlbpage.txt
 const MEMINFO_PATH: &str = "/proc/meminfo";
 const TOKEN: &str = "Hugepagesize:";
 
-static HUGEPAGE_SIZE: LazyLock<usize> = LazyLock::new(|| {
-    let mut buf = String::new();
-    if let Ok(mut f) = File::open(MEMINFO_PATH) {
-        let _ = f.read_to_string(&mut buf);
-    }
-    parse_hugepage_size(&buf).expect("failed to parse hugepage size from /proc/meminfo")
-});
+static HUGEPAGE_SIZE: LazyLock<usize> =
+    LazyLock::new(|| hugepage_size().expect("failed to parse hugepage size from /proc/meminfo"));
+
+/// Returns the system's default hugepage size in bytes.
+///
+/// This is the page size used by [`alloc`] and [`dealloc`], rather than the
+/// regular OS page size. Every call reads `/proc/meminfo` again; query results
+/// are not cached.
+///
+/// Querying the size does not require any hugepages to have been reserved and
+/// does not indicate whether any are available for allocation.
+///
+/// # Errors
+///
+/// Returns an I/O error if `/proc/meminfo` cannot be read, or
+/// [`io::ErrorKind::InvalidData`] if its hugepage size is missing or invalid.
+///
+/// # Examples
+///
+/// ```
+/// # fn main() -> std::io::Result<()> {
+/// let size = hugepage_rs::hugepage_size()?;
+/// println!("Default hugepage size: {size} bytes");
+/// # Ok(())
+/// # }
+/// ```
+pub fn hugepage_size() -> io::Result<usize> {
+    let buf = fs::read_to_string(MEMINFO_PATH)?;
+    parse_hugepage_size(&buf).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid hugepage size in /proc/meminfo",
+        )
+    })
+}
 
 fn parse_hugepage_size(s: &str) -> Option<usize> {
     for line in s.lines() {
@@ -28,7 +56,8 @@ fn parse_hugepage_size(s: &str) -> Option<usize> {
                 Some(_) => return None,
             };
 
-            return Some(size * multiplier);
+            let size = size.checked_mul(multiplier)?;
+            return size.is_power_of_two().then_some(size);
         }
     }
 
@@ -106,6 +135,24 @@ mod tests {
         assert_eq!(parse_hugepage_size("Hugepagesize:"), None);
         assert_eq!(parse_hugepage_size("Hugepagesize: abc kB"), None);
         assert_eq!(parse_hugepage_size(""), None);
+    }
+
+    #[test]
+    fn test_parse_invalid_hugepage_size() {
+        assert_eq!(parse_hugepage_size("Hugepagesize: 0 kB"), None);
+        assert_eq!(parse_hugepage_size("Hugepagesize: 3 kB"), None);
+        assert_eq!(parse_hugepage_size("Hugepagesize: 2048 MB"), None);
+        assert_eq!(
+            parse_hugepage_size(&format!("Hugepagesize: {} kB", usize::MAX)),
+            None
+        );
+    }
+
+    #[test]
+    fn test_hugepage_size() {
+        let size = crate::hugepage_size().unwrap();
+        assert!(size.is_power_of_two());
+        assert_eq!(crate::hugepage_size().unwrap(), size);
     }
 
     #[test]
