@@ -14,7 +14,7 @@ The **hugepage_rs::alloc()** function allocates size bytes and returns a pointer
 use hugepage_rs;
 
 use std::alloc::Layout;
-use std::{mem, ptr};
+use std::{ptr, slice, str};
 
 fn main() {
     let layout = Layout::array::<char>(2048).unwrap();
@@ -26,9 +26,8 @@ fn main() {
     let len = src.len();
     unsafe {
         ptr::copy_nonoverlapping(src.as_ptr(), dst, len);
-        let s = String::from_raw_parts(dst, len, len);
+        let s = str::from_utf8(slice::from_raw_parts(dst, len)).unwrap();
         assert_eq!(s, src);
-        mem::forget(s);
     }
 
     // SAFETY: dst is still allocated and layout matches the allocation.

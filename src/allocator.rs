@@ -80,7 +80,7 @@ unsafe impl GlobalAlloc for HugePageAllocator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{mem, ptr};
+    use std::{ptr, slice, str};
 
     #[test]
     fn test_parse_hugepage_size() {
@@ -121,9 +121,8 @@ mod tests {
             let src = String::from("hello rust");
             let len = src.len();
             ptr::copy_nonoverlapping(src.as_ptr(), dst, len);
-            let s = String::from_raw_parts(dst, len, len);
+            let s = str::from_utf8(slice::from_raw_parts(dst, len)).unwrap();
             assert_eq!(s, src);
-            mem::forget(s);
 
             hugepage_alloc.dealloc(dst, layout);
         }
