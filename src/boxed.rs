@@ -42,13 +42,20 @@ impl<T> Box<T> {
 
 impl<T> Drop for Box<T> {
     fn drop(&mut self) {
-        unsafe {
-            ptr::drop_in_place(self.data.as_ptr());
-            let layout = Layout::new::<T>();
-            if layout.size() != 0 {
-                dealloc(self.data.as_ptr() as *mut u8, layout);
+        struct DeallocGuard(*mut u8, Layout);
+
+        impl Drop for DeallocGuard {
+            fn drop(&mut self) {
+                if self.1.size() != 0 {
+                    // SAFETY: the guard owns the original allocation and layout.
+                    unsafe { dealloc(self.0, self.1) };
+                }
             }
         }
+
+        // Keep allocation cleanup active if T's destructor unwinds.
+        let _guard = DeallocGuard(self.data.as_ptr().cast(), Layout::new::<T>());
+        unsafe { ptr::drop_in_place(self.data.as_ptr()) };
     }
 }
 
@@ -112,6 +119,48 @@ mod tests {
         assert_eq!(DROPS.load(Ordering::SeqCst), 0);
         drop(value);
         assert_eq!(DROPS.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_boxed_drop_panic_deallocates() {
+        struct PanickingDrop {
+            _value: u8,
+        }
+
+        impl Drop for PanickingDrop {
+            fn drop(&mut self) {
+                panic!("intentional destructor panic");
+            }
+        }
+
+        let value = Box::new(PanickingDrop { _value: 1 });
+        let before = crate::allocator::DEALLOCATIONS.with(|count| count.get());
+        let result = std::panic::catch_unwind(|| drop(value));
+        assert!(result.is_err());
+        assert_eq!(
+            crate::allocator::DEALLOCATIONS.with(|count| count.get()),
+            before + 1
+        );
+    }
+
+    #[test]
+    fn test_boxed_zst_drop_panic_does_not_deallocate() {
+        struct PanickingZst;
+
+        impl Drop for PanickingZst {
+            fn drop(&mut self) {
+                panic!("intentional ZST destructor panic");
+            }
+        }
+
+        let value = Box::new(PanickingZst);
+        let before = crate::allocator::DEALLOCATIONS.with(|count| count.get());
+        let result = std::panic::catch_unwind(|| drop(value));
+        assert!(result.is_err());
+        assert_eq!(
+            crate::allocator::DEALLOCATIONS.with(|count| count.get()),
+            before
+        );
     }
 
     #[test]

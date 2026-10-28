@@ -26,6 +26,8 @@ The **hugepage_rs::alloc()** function allocates size bytes and returns a pointer
 
 Alignments larger than the system's default hugepage size are unsupported and return a null pointer.
 
+If the allocator cannot read the default hugepage size, allocation returns a null pointer. Later allocation attempts can retry the read. Successful allocator initialization is retained so freeing memory does not depend on reading `/proc/meminfo` again.
+
 ```rust
 use hugepage_rs;
 
@@ -56,6 +58,8 @@ fn main() {
 Simple Box<T> implementation with ownership, data on hugepage allocated memory, released directly after going out of scope, memory allocator using hugepage allocator.
 
 Zero-sized types (such as `()`) do not allocate hugepage memory. Their destructors still run when the box is dropped.
+
+For nonzero-sized types, the allocation is released even if the value's destructor panics and unwinds.
 
 ```
 use hugepage_rs;

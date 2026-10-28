@@ -1,14 +1,20 @@
 use libc::{
     self, c_void, MAP_ANONYMOUS, MAP_FAILED, MAP_HUGETLB, MAP_PRIVATE, PROT_READ, PROT_WRITE,
 };
-use std::{alloc::Layout, fs, io, ptr::null_mut, sync::LazyLock};
+use std::{alloc::Layout, fs, io, ptr::null_mut, sync::OnceLock};
 
 // https://www.kernel.org/doc/Documentation/vm/hugetlbpage.txt
 const MEMINFO_PATH: &str = "/proc/meminfo";
 const TOKEN: &str = "Hugepagesize:";
 
-static HUGEPAGE_SIZE: LazyLock<usize> =
-    LazyLock::new(|| hugepage_size().expect("failed to parse hugepage size from /proc/meminfo"));
+// Only successful allocator initialization is retained, so deallocation never
+// needs to read /proc. The public query below always reads the current value.
+static HUGEPAGE_SIZE: OnceLock<usize> = OnceLock::new();
+
+#[cfg(test)]
+std::thread_local! {
+    pub(crate) static DEALLOCATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// Returns the system's default hugepage size in bytes.
 ///
@@ -64,14 +70,26 @@ fn parse_hugepage_size(s: &str) -> Option<usize> {
     None
 }
 
+fn initialize_hugepage_size(
+    cache: &OnceLock<usize>,
+    read_size: impl FnOnce() -> io::Result<usize>,
+) -> io::Result<usize> {
+    if let Some(&size) = cache.get() {
+        return Ok(size);
+    }
+    let size = read_size()?;
+    Ok(*cache.get_or_init(|| size))
+}
+
 fn align_to(size: usize, align: usize) -> usize {
     (size + align - 1) & !(align - 1)
 }
 
 /// Allocate memory with the hugepage allocator.
 ///
-/// Returns null if allocation fails or the requested alignment exceeds the
-/// system's default hugepage size.
+/// Returns null if allocation fails, the default hugepage size cannot be read,
+/// or the requested alignment exceeds that size. A failed page-size read can
+/// be retried by calling this function again.
 ///
 /// # Safety
 ///
@@ -85,7 +103,9 @@ fn align_to(size: usize, align: usize) -> usize {
 /// let _ = hugepage_rs::alloc(Layout::new::<u64>());
 /// ```
 pub unsafe fn alloc(layout: Layout) -> *mut u8 {
-    let hugepage_size = *HUGEPAGE_SIZE;
+    let Ok(hugepage_size) = initialize_hugepage_size(&HUGEPAGE_SIZE, hugepage_size) else {
+        return null_mut();
+    };
     // mmap guarantees hugepage alignment, but not larger alignments.
     if layout.align() > hugepage_size {
         return null_mut();
@@ -116,8 +136,14 @@ pub unsafe fn alloc(layout: Layout) -> *mut u8 {
 /// - `ptr` must denote a block of memory currently allocated via this allocator.
 /// - `layout` must be the same layout that was used to allocate that block of memory.
 pub unsafe fn dealloc(p: *mut u8, layout: Layout) {
-    let len = align_to(layout.size(), *HUGEPAGE_SIZE);
+    // A valid allocation has already initialized the page size successfully.
+    let hugepage_size = *HUGEPAGE_SIZE
+        .get()
+        .expect("hugepage size must be initialized before deallocation");
+    let len = align_to(layout.size(), hugepage_size);
     unsafe { libc::munmap(p as *mut c_void, len) };
+    #[cfg(test)]
+    DEALLOCATIONS.with(|count| count.set(count.get() + 1));
 }
 
 #[cfg(test)]
@@ -156,6 +182,52 @@ mod tests {
     }
 
     #[test]
+    fn test_initialization_failure_can_be_retried() {
+        let cache = OnceLock::new();
+        let error = initialize_hugepage_size(&cache, || {
+            Err(io::Error::new(io::ErrorKind::NotFound, "missing meminfo"))
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert_eq!(error.to_string(), "missing meminfo");
+        assert_eq!(cache.get(), None);
+
+        let size = 2 * 1024 * 1024;
+        assert_eq!(initialize_hugepage_size(&cache, || Ok(size)).unwrap(), size);
+        assert_eq!(
+            initialize_hugepage_size(&cache, || panic!("already initialized")).unwrap(),
+            size
+        );
+    }
+
+    #[test]
+    fn test_concurrent_initialization_uses_one_page_size() {
+        let cache = OnceLock::new();
+        let barrier = std::sync::Barrier::new(4);
+        let sizes = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..4)
+                .map(|index| {
+                    let cache = &cache;
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        initialize_hugepage_size(cache, || {
+                            barrier.wait();
+                            Ok(4096 << index)
+                        })
+                        .unwrap()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let size = *cache.get().unwrap();
+        assert!(sizes.iter().all(|&result| result == size));
+    }
+
+    #[test]
     fn test_align_to() {
         assert_eq!(align_to(8, 4), 8);
         assert_eq!(align_to(8, 16), 16);
@@ -163,7 +235,7 @@ mod tests {
 
     #[test]
     fn test_unsupported_alignment() {
-        let layout = Layout::from_size_align(1, *HUGEPAGE_SIZE * 2).unwrap();
+        let layout = Layout::from_size_align(1, hugepage_size().unwrap() * 2).unwrap();
         assert!(unsafe { alloc(layout) }.is_null());
     }
 
