@@ -1,6 +1,6 @@
-use crate::default_allocator;
+use crate::{alloc, dealloc};
 
-use std::alloc::{GlobalAlloc, Layout};
+use std::alloc::Layout;
 use std::ops::{Deref, DerefMut};
 use std::ptr::{self, NonNull};
 
@@ -22,7 +22,7 @@ impl<T> Box<T> {
                 // ZSTs only need a non-null, properly aligned pointer.
                 NonNull::dangling()
             } else {
-                let p = default_allocator().alloc(layout) as *mut T;
+                let p = alloc(layout) as *mut T;
                 NonNull::new(p).expect("hugepage allocation failed")
             };
             ptr::write(nn.as_ptr(), data);
@@ -46,7 +46,7 @@ impl<T> Drop for Box<T> {
             ptr::drop_in_place(self.data.as_ptr());
             let layout = Layout::new::<T>();
             if layout.size() != 0 {
-                default_allocator().dealloc(self.data.as_ptr() as *mut u8, layout);
+                dealloc(self.data.as_ptr() as *mut u8, layout);
             }
         }
     }

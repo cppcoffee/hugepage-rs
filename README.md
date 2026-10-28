@@ -10,6 +10,8 @@ Hugepage allocator provides two interfaces for operation, **hugepage_rs::alloc**
 
 The **hugepage_rs::alloc()** function allocates size bytes and returns a pointer to the allocated memory. *The memory is not initialized*. returns **std::ptr::null_mut()** if allocation fails, otherwise returns a pointer. Calling it is unsafe and requires a non-zero layout size.
 
+Alignments larger than the system's default hugepage size are unsupported and return a null pointer.
+
 ```rust
 use hugepage_rs;
 
