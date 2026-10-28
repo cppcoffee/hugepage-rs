@@ -5,6 +5,8 @@ use std::ops::{Deref, DerefMut};
 use std::ptr::{self, NonNull};
 
 /// A pointer type for hugepage allocation.
+///
+/// Zero-sized types do not allocate memory, but their destructors still run.
 pub struct Box<T> {
     data: NonNull<T>,
 }
@@ -16,9 +18,14 @@ impl<T> Box<T> {
     pub fn new(data: T) -> Box<T> {
         let layout = Layout::new::<T>();
         unsafe {
-            let p = default_allocator().alloc(layout) as *mut T;
-            let mut nn = NonNull::new(p).expect("hugepage allocation failed");
-            ptr::write(nn.as_mut(), data);
+            let nn = if layout.size() == 0 {
+                // ZSTs only need a non-null, properly aligned pointer.
+                NonNull::dangling()
+            } else {
+                let p = default_allocator().alloc(layout) as *mut T;
+                NonNull::new(p).expect("hugepage allocation failed")
+            };
+            ptr::write(nn.as_ptr(), data);
             Self { data: nn }
         }
     }
@@ -37,7 +44,10 @@ impl<T> Drop for Box<T> {
     fn drop(&mut self) {
         unsafe {
             ptr::drop_in_place(self.data.as_ptr());
-            default_allocator().dealloc(self.data.as_ptr() as *mut u8, Layout::new::<T>());
+            let layout = Layout::new::<T>();
+            if layout.size() != 0 {
+                default_allocator().dealloc(self.data.as_ptr() as *mut u8, layout);
+            }
         }
     }
 }
@@ -58,6 +68,51 @@ impl<T> DerefMut for Box<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn test_boxed_zst() {
+        let mut value = Box::new(());
+        assert_eq!(*value, ());
+        *value = ();
+
+        let empty = Box::new([0u64; 0]);
+        assert_eq!(*empty, []);
+    }
+
+    #[test]
+    fn test_boxed_aligned_zst() {
+        #[repr(align(4096))]
+        struct AlignedZst;
+
+        assert_eq!(std::mem::size_of::<AlignedZst>(), 0);
+        let mut value = Box::new(AlignedZst);
+        let alignment = std::mem::align_of::<AlignedZst>();
+        let address = (&*value as *const AlignedZst) as usize;
+        assert_ne!(address, 0);
+        assert_eq!(address % alignment, 0);
+        let address = (&mut *value as *mut AlignedZst) as usize;
+        assert_eq!(address % alignment, 0);
+    }
+
+    #[test]
+    fn test_boxed_zst_drop() {
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+
+        struct ZstWithDrop;
+
+        impl Drop for ZstWithDrop {
+            fn drop(&mut self) {
+                DROPS.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        assert_eq!(std::mem::size_of::<ZstWithDrop>(), 0);
+        let value = Box::new(ZstWithDrop);
+        assert_eq!(DROPS.load(Ordering::SeqCst), 0);
+        drop(value);
+        assert_eq!(DROPS.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn test_boxed() {

@@ -23,9 +23,17 @@ pub(crate) fn default_allocator() -> &'static HugePageAllocator {
 ///
 /// # Safety
 ///
-/// See [`GlobalAlloc::alloc`].
+/// `layout` must have non-zero size. See [`GlobalAlloc::alloc`].
+///
+/// Calling this function requires an unsafe block:
+///
+/// ```compile_fail,E0133
+/// use std::alloc::Layout;
+///
+/// let _ = hugepage_rs::alloc(Layout::new::<u64>());
+/// ```
 #[cfg(target_os = "linux")]
-pub fn alloc(layout: Layout) -> *mut u8 {
+pub unsafe fn alloc(layout: Layout) -> *mut u8 {
     unsafe { HUGEPAGE_ALLOCATOR.alloc(layout) }
 }
 
