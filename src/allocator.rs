@@ -1,19 +1,13 @@
 use libc::{
     self, c_void, MAP_ANONYMOUS, MAP_FAILED, MAP_HUGETLB, MAP_PRIVATE, PROT_READ, PROT_WRITE,
 };
-use std::{
-    alloc::{GlobalAlloc, Layout},
-    fs::File,
-    io::Read,
-    ptr::null_mut,
-    sync::LazyLock,
-};
+use std::{alloc::Layout, fs::File, io::Read, ptr::null_mut, sync::LazyLock};
 
 // https://www.kernel.org/doc/Documentation/vm/hugetlbpage.txt
 const MEMINFO_PATH: &str = "/proc/meminfo";
 const TOKEN: &str = "Hugepagesize:";
 
-pub(crate) static HUGEPAGE_SIZE: LazyLock<usize> = LazyLock::new(|| {
+static HUGEPAGE_SIZE: LazyLock<usize> = LazyLock::new(|| {
     let mut buf = String::new();
     if let Ok(mut f) = File::open(MEMINFO_PATH) {
         let _ = f.read_to_string(&mut buf);
@@ -45,42 +39,62 @@ fn align_to(size: usize, align: usize) -> usize {
     (size + align - 1) & !(align - 1)
 }
 
-pub(crate) fn aligned_size(layout: Layout) -> usize {
-    align_to(layout.size(), *HUGEPAGE_SIZE)
-}
-
-// hugepage allocator.
-pub(crate) struct HugePageAllocator;
-
-unsafe impl GlobalAlloc for HugePageAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let len = aligned_size(layout);
-        let p = libc::mmap(
+/// Allocate memory with the hugepage allocator.
+///
+/// Returns null if allocation fails or the requested alignment exceeds the
+/// system's default hugepage size.
+///
+/// # Safety
+///
+/// `layout` must have non-zero size. See [`std::alloc::GlobalAlloc::alloc`].
+///
+/// Calling this function requires an unsafe block:
+///
+/// ```compile_fail,E0133
+/// use std::alloc::Layout;
+///
+/// let _ = hugepage_rs::alloc(Layout::new::<u64>());
+/// ```
+pub unsafe fn alloc(layout: Layout) -> *mut u8 {
+    let hugepage_size = *HUGEPAGE_SIZE;
+    // mmap guarantees hugepage alignment, but not larger alignments.
+    if layout.align() > hugepage_size {
+        return null_mut();
+    }
+    let len = align_to(layout.size(), hugepage_size);
+    let p = unsafe {
+        libc::mmap(
             null_mut(),
             len,
             PROT_READ | PROT_WRITE,
             MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB,
             -1,
             0,
-        );
+        )
+    };
 
-        if p == MAP_FAILED {
-            return null_mut();
-        }
-
-        p as *mut u8
+    if p == MAP_FAILED {
+        return null_mut();
     }
 
-    unsafe fn dealloc(&self, p: *mut u8, layout: Layout) {
-        let len = aligned_size(layout);
-        libc::munmap(p as *mut c_void, len);
-    }
+    p as *mut u8
+}
+
+/// Deallocate memory with the hugepage allocator.
+///
+/// # Safety
+///
+/// - `ptr` must denote a block of memory currently allocated via this allocator.
+/// - `layout` must be the same layout that was used to allocate that block of memory.
+pub unsafe fn dealloc(p: *mut u8, layout: Layout) {
+    let len = align_to(layout.size(), *HUGEPAGE_SIZE);
+    unsafe { libc::munmap(p as *mut c_void, len) };
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{mem, ptr};
+    use std::{ptr, slice, str};
 
     #[test]
     fn test_parse_hugepage_size() {
@@ -101,31 +115,34 @@ mod tests {
     }
 
     #[test]
-    fn test_allocator() {
-        let hugepage_alloc = HugePageAllocator;
+    fn test_unsupported_alignment() {
+        let layout = Layout::from_size_align(1, *HUGEPAGE_SIZE * 2).unwrap();
+        assert!(unsafe { alloc(layout) }.is_null());
+    }
 
+    #[test]
+    fn test_allocator() {
         unsafe {
             let layout = Layout::new::<u16>();
-            let p = hugepage_alloc.alloc(layout);
+            let p = alloc(layout);
             assert_ne!(p, null_mut());
             *p = 20;
             assert_eq!(*p, 20);
-            hugepage_alloc.dealloc(p, layout);
+            dealloc(p, layout);
         }
 
         unsafe {
             let layout = Layout::array::<char>(2048).unwrap();
-            let dst = hugepage_alloc.alloc(layout);
+            let dst = alloc(layout);
             assert_ne!(dst, null_mut());
 
             let src = String::from("hello rust");
             let len = src.len();
             ptr::copy_nonoverlapping(src.as_ptr(), dst, len);
-            let s = String::from_raw_parts(dst, len, len);
+            let s = str::from_utf8(slice::from_raw_parts(dst, len)).unwrap();
             assert_eq!(s, src);
-            mem::forget(s);
 
-            hugepage_alloc.dealloc(dst, layout);
+            dealloc(dst, layout);
         }
     }
 }

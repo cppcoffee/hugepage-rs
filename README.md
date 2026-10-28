@@ -8,34 +8,40 @@ hugepage-rs wrapped allocator for linux hugepage.
 
 Hugepage allocator provides two interfaces for operation, **hugepage_rs::alloc** and **hugepage_rs::dealloc**, allocate and free hugepage memory.
 
-The **hugepage_rs::alloc()** function allocates size bytes and returns a pointer to the allocated memory. *The memory is not initialized*. returns **std::ptr::null_mut()** if allocation fails, otherwise returns a pointer.
+The **hugepage_rs::alloc()** function allocates size bytes and returns a pointer to the allocated memory. *The memory is not initialized*. returns **std::ptr::null_mut()** if allocation fails, otherwise returns a pointer. Calling it is unsafe and requires a non-zero layout size.
+
+Alignments larger than the system's default hugepage size are unsupported and return a null pointer.
 
 ```rust
 use hugepage_rs;
 
 use std::alloc::Layout;
-use std::{mem, ptr};
+use std::{ptr, slice, str};
 
 fn main() {
     let layout = Layout::array::<char>(2048).unwrap();
-    let dst = hugepage_rs::alloc(layout);
+    // SAFETY: the layout has non-zero size.
+    let dst = unsafe { hugepage_rs::alloc(layout) };
+    assert!(!dst.is_null(), "hugepage allocation failed");
 
     let src = String::from("hello");
     let len = src.len();
     unsafe {
         ptr::copy_nonoverlapping(src.as_ptr(), dst, len);
-        let s = String::from_raw_parts(dst, len, len);
+        let s = str::from_utf8(slice::from_raw_parts(dst, len)).unwrap();
         assert_eq!(s, src);
-        mem::forget(s);
     }
 
-    hugepage_rs::dealloc(dst, layout);
+    // SAFETY: dst is still allocated and layout matches the allocation.
+    unsafe { hugepage_rs::dealloc(dst, layout) };
 }
 ```
 
 #### HugePage Boxed
 
 Simple Box<T> implementation with ownership, data on hugepage allocated memory, released directly after going out of scope, memory allocator using hugepage allocator.
+
+Zero-sized types (such as `()`) do not allocate hugepage memory. Their destructors still run when the box is dropped.
 
 ```
 use hugepage_rs;
