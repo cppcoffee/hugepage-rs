@@ -20,7 +20,7 @@ This queries the hugepage size, not the regular OS page size or the number of av
 
 #### HugePage Allocator
 
-Hugepage allocator provides two interfaces for operation, **hugepage_rs::alloc** and **hugepage_rs::dealloc**, allocate and free hugepage memory.
+Use **hugepage_rs::alloc** to allocate hugepage memory and **hugepage_rs::try_dealloc** to free it with system error reporting. **hugepage_rs::dealloc** remains available for callers that cannot report unmapping errors, including destructors during unwinding.
 
 The **hugepage_rs::alloc()** function allocates size bytes and returns a pointer to the allocated memory. *The memory is not initialized*. returns **std::ptr::null_mut()** if allocation fails, otherwise returns a pointer. Calling it is unsafe and requires a non-zero layout size.
 
@@ -59,7 +59,7 @@ Simple Box<T> implementation with ownership, data on hugepage allocated memory, 
 
 Zero-sized types (such as `()`) do not allocate hugepage memory. Their destructors still run when the box is dropped.
 
-For nonzero-sized types, the allocation is released even if the value's destructor panics and unwinds.
+For nonzero-sized types, deallocation is attempted even if the value's destructor panics and unwinds. System unmapping errors do not cause another panic during cleanup.
 
 ```
 use hugepage_rs;
@@ -69,6 +69,15 @@ fn main() {
     *v += 42;
     assert_eq!(*v, 47);
 }
+```
+
+`Box::into_raw` transfers ownership to a raw pointer without dropping the value or freeing its memory. Reconstruct it exactly once with this crate's `Box::from_raw` to resume automatic cleanup:
+
+```rust
+let raw = hugepage_rs::Box::into_raw(hugepage_rs::Box::new(42u64));
+// SAFETY: raw came from this box type, is still valid, and is reclaimed once.
+let value = unsafe { hugepage_rs::Box::from_raw(raw) };
+assert_eq!(*value, 42);
 ```
 
 

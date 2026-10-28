@@ -1,6 +1,7 @@
 use crate::{alloc, dealloc};
 
 use std::alloc::Layout;
+use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
 use std::ptr::{self, NonNull};
 
@@ -30,9 +31,42 @@ impl<T> Box<T> {
         }
     }
 
+    /// Consumes the box and transfers ownership to a raw pointer.
+    ///
+    /// The pointer is non-null and properly aligned, including for zero-sized
+    /// types. Neither the value nor its allocation is dropped by this function.
+    /// The caller becomes responsible for destruction and deallocation; the
+    /// simplest way to do that is to reconstruct this box with [`Self::from_raw`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let raw = hugepage_rs::Box::into_raw(hugepage_rs::Box::new(String::from("hello")));
+    /// // SAFETY: raw came from this box type and ownership has not been reclaimed.
+    /// let value = unsafe { hugepage_rs::Box::from_raw(raw) };
+    /// assert_eq!(&**value, "hello");
+    /// ```
+    #[must_use = "losing the pointer leaks the value and its allocation"]
+    pub fn into_raw(this: Self) -> *mut T {
+        let this = ManuallyDrop::new(this);
+        this.data.as_ptr()
+    }
+
+    /// Reconstructs a box and takes ownership of its value and allocation.
+    ///
     /// # Safety
     ///
-    /// `raw` must be a non-null pointer previously obtained from `Box::into_raw`.
+    /// - `raw` must have been returned by this crate's [`Self::into_raw`] for
+    ///   the same type `T`, and ownership must not have been reclaimed already.
+    /// - It must be non-null, properly aligned, and point to a live, initialized
+    ///   value of `T`. For nonzero-sized types, the original hugepage allocation
+    ///   must still be allocated with the layout for `T`.
+    /// - The caller must transfer exclusive ownership. No other owner may drop
+    ///   the value or free its allocation, and existing references must not be
+    ///   used in conflict with ownership by the returned box.
+    ///
+    /// For zero-sized types no allocation is required, but the pointer and
+    /// ownership requirements still apply. Dropping the returned box drops `T`.
     pub unsafe fn from_raw(raw: *mut T) -> Self {
         Self {
             data: NonNull::new(raw).expect("Box::from_raw received null pointer"),
@@ -76,6 +110,93 @@ impl<T> DerefMut for Box<T> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    // Match issue #9's nested Box<String> payload intentionally.
+    #[allow(clippy::box_collection)]
+    fn test_boxed_construction_does_not_drop_uninitialized_value() {
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+
+        struct DropCount {
+            value: std::boxed::Box<String>,
+        }
+
+        impl Drop for DropCount {
+            fn drop(&mut self) {
+                DROPS.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let value = Box::new(DropCount {
+            value: std::boxed::Box::new(String::from("hello")),
+        });
+        assert_eq!(DROPS.load(Ordering::SeqCst), 0);
+        assert_eq!(value.value.as_str(), "hello");
+        drop(value);
+        assert_eq!(DROPS.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_boxed_raw_roundtrip_transfers_ownership_once() {
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+
+        struct DropCount {
+            value: u64,
+        }
+
+        impl Drop for DropCount {
+            fn drop(&mut self) {
+                DROPS.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let value = Box::new(DropCount { value: 42 });
+        let before = crate::allocator::DEALLOCATIONS.with(|count| count.get());
+        let raw = Box::into_raw(value);
+        assert!(!raw.is_null());
+        assert_eq!(DROPS.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            crate::allocator::DEALLOCATIONS.with(|count| count.get()),
+            before
+        );
+
+        // SAFETY: raw came from this box type and still has exclusive ownership.
+        let value = unsafe { Box::from_raw(raw) };
+        assert_eq!(value.value, 42);
+        drop(value);
+        assert_eq!(DROPS.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            crate::allocator::DEALLOCATIONS.with(|count| count.get()),
+            before + 1
+        );
+    }
+
+    #[test]
+    fn test_boxed_aligned_zst_raw_roundtrip() {
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+
+        #[repr(align(4096))]
+        struct AlignedZst;
+
+        impl Drop for AlignedZst {
+            fn drop(&mut self) {
+                DROPS.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let before = crate::allocator::DEALLOCATIONS.with(|count| count.get());
+        let raw = Box::into_raw(Box::new(AlignedZst));
+        assert!(!raw.is_null());
+        assert_eq!(raw as usize % std::mem::align_of::<AlignedZst>(), 0);
+        assert_eq!(DROPS.load(Ordering::SeqCst), 0);
+        // SAFETY: the aligned ZST pointer came from into_raw and is reclaimed once.
+        drop(unsafe { Box::from_raw(raw) });
+        assert_eq!(DROPS.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            crate::allocator::DEALLOCATIONS.with(|count| count.get()),
+            before
+        );
+    }
 
     #[test]
     fn test_boxed_zst() {

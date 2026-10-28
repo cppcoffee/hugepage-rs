@@ -13,6 +13,7 @@ static HUGEPAGE_SIZE: OnceLock<usize> = OnceLock::new();
 
 #[cfg(test)]
 std::thread_local! {
+    // Count only successful munmap calls on this test thread.
     pub(crate) static DEALLOCATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -131,19 +132,63 @@ pub unsafe fn alloc(layout: Layout) -> *mut u8 {
 
 /// Deallocate memory with the hugepage allocator.
 ///
+/// System unmapping errors are ignored so this function can be used during
+/// unwinding. Use [`try_dealloc`] to inspect those errors.
+///
 /// # Safety
 ///
 /// - `ptr` must denote a block of memory currently allocated via this allocator.
 /// - `layout` must be the same layout that was used to allocate that block of memory.
 pub unsafe fn dealloc(p: *mut u8, layout: Layout) {
+    let _ = unsafe { try_dealloc(p, layout) };
+}
+
+/// Deallocate memory with the hugepage allocator and report system errors.
+///
+/// # Errors
+///
+/// Returns the operating system error if `munmap` fails. An error must not be
+/// interpreted as successful release of the memory.
+///
+/// # Safety
+///
+/// - `p` must denote a block of memory currently allocated via this allocator.
+/// - `layout` must be the same layout used to allocate that block.
+/// - The memory must no longer be accessed after successful deallocation.
+///   Any values requiring destruction must be dropped before deallocation.
+///
+/// # Examples
+///
+/// ```
+/// # fn main() -> std::io::Result<()> {
+/// let layout = std::alloc::Layout::new::<u64>();
+/// let p = unsafe { hugepage_rs::alloc(layout) };
+/// if !p.is_null() {
+///     // SAFETY: p is still allocated with this exact layout, and no value
+///     // requiring destruction has been placed in the allocation.
+///     unsafe { hugepage_rs::try_dealloc(p, layout) }?;
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub unsafe fn try_dealloc(p: *mut u8, layout: Layout) -> io::Result<()> {
     // A valid allocation has already initialized the page size successfully.
     let hugepage_size = *HUGEPAGE_SIZE
         .get()
         .expect("hugepage size must be initialized before deallocation");
     let len = align_to(layout.size(), hugepage_size);
-    unsafe { libc::munmap(p as *mut c_void, len) };
+    unsafe { unmap(p, len) }
+}
+
+// SAFETY: any mappings in the range must be exclusively owned and no longer
+// in use. An empty range is allowed and will be rejected by the system call.
+unsafe fn unmap(p: *mut u8, len: usize) -> io::Result<()> {
+    if unsafe { libc::munmap(p as *mut c_void, len) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
     #[cfg(test)]
     DEALLOCATIONS.with(|count| count.set(count.get() + 1));
+    Ok(())
 }
 
 #[cfg(test)]
@@ -237,6 +282,27 @@ mod tests {
     fn test_unsupported_alignment() {
         let layout = Layout::from_size_align(1, hugepage_size().unwrap() * 2).unwrap();
         assert!(unsafe { alloc(layout) }.is_null());
+    }
+
+    #[test]
+    fn test_unmap_failure_is_reported_without_counting_success() {
+        let before = DEALLOCATIONS.with(|count| count.get());
+        // SAFETY: the empty range contains no live memory. Linux rejects a
+        // zero length with EINVAL without unmapping anything.
+        let error = unsafe { unmap(null_mut(), 0) }.unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EINVAL));
+        assert_eq!(DEALLOCATIONS.with(|count| count.get()), before);
+    }
+
+    #[test]
+    fn test_try_dealloc_records_successful_unmap() {
+        let layout = Layout::new::<u64>();
+        let p = unsafe { alloc(layout) };
+        assert!(!p.is_null());
+        let before = DEALLOCATIONS.with(|count| count.get());
+        // SAFETY: p belongs to this allocator, matches layout, and is unused.
+        unsafe { try_dealloc(p, layout) }.unwrap();
+        assert_eq!(DEALLOCATIONS.with(|count| count.get()), before + 1);
     }
 
     #[test]
